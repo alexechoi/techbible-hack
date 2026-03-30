@@ -8,11 +8,11 @@ import CountryCard from "./components/CountryCard";
 import DecisionCard from "./components/DecisionCard";
 import BuyAlert from "./components/BuyAlert";
 import WatchToggle from "./components/WatchToggle";
-import { CardSkeleton } from "./components/Skeleton";
 
 interface PriceData {
   country: string;
   country_code: string;
+  domain: string;
   currency: string;
   original_price: number | null;
   price_gbp: number | null;
@@ -22,6 +22,7 @@ interface PriceData {
   shipping_gbp: number;
   landed_cost_gbp: number | null;
   savings_vs_uk_pct: number | null;
+  product_title: string;
   error: string | null;
 }
 
@@ -37,23 +38,19 @@ interface Decision {
   reasoning: string;
 }
 
-interface ArbitrageResult {
-  asin: string;
-  product_title: string;
-  uk_price: number | null;
-  prices: PriceData[];
-  decision: Decision | null;
-}
+const COUNTRY_ORDER = ["GB", "DE", "FR", "ES", "IT"];
 
 export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [result, setResult] = useState<ArbitrageResult | null>(null);
+  const [liveCountries, setLiveCountries] = useState<Record<string, PriceData>>({});
+  const [decision, setDecision] = useState<Decision | null>(null);
   const [alert, setAlert] = useState<{
     savingsGbp: number;
     savingsPct: number;
     country: string;
   } | null>(null);
+  const [scrapingSet, setScrapingSet] = useState<Set<string>>(new Set());
   const [watchActive, setWatchActive] = useState(false);
   const [lastChecked, setLastChecked] = useState<string | null>(null);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
@@ -66,8 +63,10 @@ export default function Home() {
 
     setIsRunning(true);
     setLogEntries([]);
-    setResult(null);
+    setLiveCountries({});
+    setDecision(null);
     setAlert(null);
+    setScrapingSet(new Set());
     setCurrentUrl(url);
 
     try {
@@ -114,12 +113,58 @@ export default function Home() {
               const entry: LogEntry = {
                 type: parsed.type || currentEvent,
                 message: parsed.message || "",
-                timestamp: parsed.timestamp || new Date().toLocaleTimeString("en-GB", { hour12: false }),
+                timestamp:
+                  parsed.timestamp ||
+                  new Date().toLocaleTimeString("en-GB", { hour12: false }),
               };
               setLogEntries((prev) => [...prev, entry]);
 
+              if (parsed.type === "scraping" && parsed.message) {
+                const domainMatch = parsed.message.match(
+                  /amazon\.(co\.uk|de|fr|es|it)/,
+                );
+                if (domainMatch) {
+                  setScrapingSet((prev) => new Set(prev).add(domainMatch[0]));
+                }
+              }
+
+              if (parsed.type === "price_found" && parsed.data) {
+                const d = parsed.data;
+                setLiveCountries((prev) => ({
+                  ...prev,
+                  [d.country_code]: {
+                    country: d.country,
+                    country_code: d.country_code,
+                    domain: d.domain || "",
+                    currency: d.currency,
+                    original_price: d.price,
+                    price_gbp: d.currency === "GBP" ? d.price : null,
+                    vat_rate: 0,
+                    ex_vat_gbp: null,
+                    with_uk_vat_gbp: null,
+                    shipping_gbp: d.country_code === "GB" ? 0 : 10,
+                    landed_cost_gbp: null,
+                    savings_vs_uk_pct: null,
+                    product_title: d.title || "",
+                    error: null,
+                  },
+                }));
+              }
+
               if (parsed.type === "complete" && parsed.data) {
-                setResult(parsed.data as ArbitrageResult);
+                const result = parsed.data;
+                const updated: Record<string, PriceData> = {};
+                for (const p of result.prices) {
+                  updated[p.country_code] = p;
+                }
+                setLiveCountries(updated);
+                if (result.decision) {
+                  setDecision(result.decision);
+                }
+              }
+
+              if (parsed.type === "decision" && parsed.data) {
+                setDecision(parsed.data as Decision);
               }
 
               if (parsed.type === "alert" && parsed.data) {
@@ -130,7 +175,7 @@ export default function Home() {
                 });
               }
             } catch {
-              // non-JSON SSE data, ignore
+              // non-JSON SSE data
             }
           }
         }
@@ -167,7 +212,12 @@ export default function Home() {
     }
   }, [watchActive, currentUrl]);
 
-  const bestCountry = result?.decision?.best_country;
+  const sortedPrices = COUNTRY_ORDER
+    .filter((cc) => liveCountries[cc])
+    .map((cc) => liveCountries[cc]);
+
+  const hasAnyData =
+    sortedPrices.length > 0 || decision !== null || scrapingSet.size > 0;
 
   return (
     <div className="flex flex-col h-screen">
@@ -190,9 +240,9 @@ export default function Home() {
           <AgentLog entries={logEntries} />
         </div>
 
-        {/* Right panel: Results */}
+        {/* Right panel: Results (progressive) */}
         <div className="w-[60%] overflow-y-auto p-6 space-y-6">
-          {!result && !isRunning && (
+          {!hasAnyData && !isRunning && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center space-y-2">
                 <p className="text-muted text-sm">
@@ -205,41 +255,46 @@ export default function Home() {
             </div>
           )}
 
-          {isRunning && !result && (
-            <div className="space-y-4">
-              <div className="rounded-xl border-2 border-border bg-surface p-5 space-y-3">
-                <div className="h-6 w-32 animate-pulse rounded bg-zinc-800/60" />
-                <div className="h-4 w-full animate-pulse rounded bg-zinc-800/60" />
-                <div className="h-1.5 w-full animate-pulse rounded bg-zinc-800/60" />
-              </div>
-              <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <CardSkeleton key={i} />
+          {/* Scanning indicator before any prices arrive */}
+          {isRunning && sortedPrices.length === 0 && scrapingSet.size > 0 && (
+            <div className="rounded-lg border border-border bg-surface p-4 animate-fade-in">
+              <p className="text-sm text-muted mb-3 font-mono">
+                Scanning {scrapingSet.size} Amazon stores...
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                {Array.from(scrapingSet).map((domain) => (
+                  <span
+                    key={domain}
+                    className="text-xs px-2 py-1 rounded-md bg-accent/10 text-accent font-mono animate-pulse"
+                  >
+                    {domain}
+                  </span>
                 ))}
               </div>
             </div>
           )}
 
-          {result && (
-            <>
-              {result.decision && (
-                <DecisionCard decision={result.decision} />
-              )}
+          {decision && <DecisionCard decision={decision} />}
 
-              {result.product_title && (
-                <p className="text-sm text-muted truncate" title={result.product_title}>
-                  {result.product_title}
+          {sortedPrices.length > 0 && (
+            <>
+              {sortedPrices[0]?.product_title && (
+                <p
+                  className="text-sm text-muted truncate"
+                  title={sortedPrices[0].product_title}
+                >
+                  {sortedPrices[0].product_title}
                 </p>
               )}
-
               <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
-                {result.prices.map((p) => (
-                  <CountryCard
-                    key={p.country_code}
-                    data={p}
-                    isBest={p.country === bestCountry}
-                    isUk={p.country === "UK"}
-                  />
+                {sortedPrices.map((p) => (
+                  <div key={p.country_code} className="animate-fade-in">
+                    <CountryCard
+                      data={p}
+                      isBest={p.country === decision?.best_country}
+                      isUk={p.country === "UK"}
+                    />
+                  </div>
                 ))}
               </div>
             </>
