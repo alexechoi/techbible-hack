@@ -8,4 +8,4 @@ frontend:
 	cd next-app && npm run dev
 
 backend:
-	cd backend && uv run uvicorn main:app --reload
+	uv run uvicorn backend.main:app --reload
