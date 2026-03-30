@@ -25,8 +25,8 @@ class AgentEvent(BaseModel):
     data: dict | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
 
-    def to_sse(self) -> str:
-        return f"event: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
+    def to_sse_dict(self) -> dict:
+        return {"event": self.type.value, "data": self.model_dump_json()}
 
 
 class PriceData(BaseModel):

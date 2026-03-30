@@ -62,19 +62,22 @@ def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | N
     """Extract the first plausible product price from scraped markdown."""
     escaped = re.escape(currency_symbol)
 
-    # "€89,99" or "€89.99" or "£109.99"
+    # Handle non-breaking spaces (\xa0) that Amazon uses
+    text = markdown.replace("\xa0", " ")
+
     patterns = [
-        rf"{escaped}\s*(\d{{1,5}}[.,]\d{{2}})",
-        rf"(\d{{1,5}}[.,]\d{{2}})\s*{escaped}",
-        rf"{escaped}\s*(\d{{1,5}})",
+        rf"{escaped}\s*(\d{{1,5}}[.,]\d{{2}})",       # €89,99 or £109.99
+        rf"(\d{{1,5}}[.,]\d{{2}})\s*{escaped}",       # 89,99 € or 109.99£
+        rf"{escaped}\s*(\d{{1,5}})",                   # €89 or £109
+        rf"(\d{{1,5}})\s*{escaped}",                   # 89 € or 109£
     ]
     for pat in patterns:
-        matches = re.findall(pat, markdown)
+        matches = re.findall(pat, text)
         for raw in matches:
             try:
                 cleaned = raw.replace(",", ".")
                 price = float(cleaned)
-                if 0.50 < price < 10_000:
+                if 1.0 < price < 10_000:
                     return price
             except ValueError:
                 continue
