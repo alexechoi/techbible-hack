@@ -61,10 +61,10 @@ def extract_asin(url: str) -> str | None:
 def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | None:
     """Extract the headline product price from scraped markdown.
 
-    The main product price on Amazon is typically repeated several times on the
-    page (price block, buy box, sticky bar), while finance/installment prices
-    or accessory prices appear only once. We pick the most frequently occurring
-    price, breaking ties by choosing the higher value (headline > installment).
+    Strategy: the real product price appears in the top portion of the page
+    (price block, buy box) while "related product" prices appear lower down.
+    We score prices found in the top 20% of the page 3x higher, then pick
+    the highest-scoring price, breaking ties by value (headline > accessory).
     """
     escaped = re.escape(currency_symbol)
     text = markdown.replace("\xa0", " ")
@@ -77,23 +77,32 @@ def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | N
     ]
 
     from collections import Counter
-    price_counts: Counter[float] = Counter()
+    top_cutoff = len(text) // 5
+    top_prices: Counter[float] = Counter()
+    all_prices: Counter[float] = Counter()
 
     for pat in patterns:
-        for raw in re.findall(pat, text):
+        for m in re.finditer(pat, text):
+            raw = m.group(1)
             try:
                 cleaned = raw.replace(",", ".")
                 price = float(cleaned)
                 if 1.0 < price < 10_000:
-                    price_counts[price] += 1
+                    all_prices[price] += 1
+                    if m.start() < top_cutoff:
+                        top_prices[price] += 1
             except ValueError:
                 continue
 
-    if not price_counts:
+    if not all_prices:
         return None
 
-    max_freq = max(price_counts.values())
-    candidates = [p for p, c in price_counts.items() if c == max_freq]
+    scores: Counter[float] = Counter()
+    for price, count in all_prices.items():
+        scores[price] = count + top_prices.get(price, 0) * 3
+
+    max_score = max(scores.values())
+    candidates = [p for p, s in scores.items() if s == max_score]
     return max(candidates)
 
 
