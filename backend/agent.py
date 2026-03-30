@@ -8,7 +8,7 @@ from typing import AsyncGenerator
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from sse_starlette.sse import ServerSentEvent
 
@@ -149,8 +149,8 @@ def calculate_eu_landed_cost(
 
 
 def _build_agent():
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    llm = ChatOpenAI(model=model_name, temperature=0, streaming=True)
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0)
     return create_react_agent(
         model=llm,
         tools=[scrape_amazon_product, calculate_eu_landed_cost],

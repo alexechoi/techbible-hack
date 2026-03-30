@@ -5,9 +5,13 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+_root = Path(__file__).resolve().parent.parent
+load_dotenv(_root / ".env")
+load_dotenv()  # also pick up backend/.env if present
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
