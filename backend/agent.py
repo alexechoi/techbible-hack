@@ -12,18 +12,18 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from sse_starlette.sse import ServerSentEvent
 
-from backend.arbitrage import (
+from arbitrage import (
     calculate_landed_cost,
     make_decision,
 )
-from backend.mcp_client import scrape_url
-from backend.models import (
+from mcp_client import scrape_url
+from models import (
     AgentEvent,
     ArbitrageResult,
     EventType,
     PriceData,
 )
-from backend.scraper import (
+from scraper import (
     AMAZON_DOMAINS,
     _extract_title_from_markdown,
     _parse_price_from_markdown,

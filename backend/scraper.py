@@ -5,8 +5,8 @@ import logging
 import re
 from typing import AsyncGenerator
 
-from backend.mcp_client import scrape_url
-from backend.models import AgentEvent, EventType, PriceData
+from mcp_client import scrape_url
+from models import AgentEvent, EventType, PriceData
 
 logger = logging.getLogger(__name__)
 

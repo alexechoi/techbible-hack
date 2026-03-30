@@ -5,11 +5,13 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 _backend_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(_backend_dir))
 load_dotenv(_backend_dir / ".env")
 load_dotenv()  # also pick up cwd .env if present
 
@@ -17,8 +19,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
-from backend.agent import run_arbitrage_agent
-from backend.models import ArbitrageRequest, WatcherState
+from agent import run_arbitrage_agent
+from models import ArbitrageRequest, WatcherState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

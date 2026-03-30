@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.models import AgentEvent, Decision, EventType, PriceData, Verdict
+from models import AgentEvent, Decision, EventType, PriceData, Verdict
 
 FX_RATES: dict[str, float] = {
     "GBP": 1.0,
