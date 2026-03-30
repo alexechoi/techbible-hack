@@ -59,29 +59,42 @@ def extract_asin(url: str) -> str | None:
 
 
 def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | None:
-    """Extract the first plausible product price from scraped markdown."""
-    escaped = re.escape(currency_symbol)
+    """Extract the headline product price from scraped markdown.
 
-    # Handle non-breaking spaces (\xa0) that Amazon uses
+    The main product price on Amazon is typically repeated several times on the
+    page (price block, buy box, sticky bar), while finance/installment prices
+    or accessory prices appear only once. We pick the most frequently occurring
+    price, breaking ties by choosing the higher value (headline > installment).
+    """
+    escaped = re.escape(currency_symbol)
     text = markdown.replace("\xa0", " ")
 
     patterns = [
-        rf"{escaped}\s*(\d{{1,5}}[.,]\d{{2}})",       # €89,99 or £109.99
-        rf"(\d{{1,5}}[.,]\d{{2}})\s*{escaped}",       # 89,99 € or 109.99£
-        rf"{escaped}\s*(\d{{1,5}})",                   # €89 or £109
-        rf"(\d{{1,5}})\s*{escaped}",                   # 89 € or 109£
+        rf"{escaped}\s*(\d{{1,5}}[.,]\d{{2}})",
+        rf"(\d{{1,5}}[.,]\d{{2}})\s*{escaped}",
+        rf"{escaped}\s*(\d{{1,5}})",
+        rf"(\d{{1,5}})\s*{escaped}",
     ]
+
+    from collections import Counter
+    price_counts: Counter[float] = Counter()
+
     for pat in patterns:
-        matches = re.findall(pat, text)
-        for raw in matches:
+        for raw in re.findall(pat, text):
             try:
                 cleaned = raw.replace(",", ".")
                 price = float(cleaned)
                 if 1.0 < price < 10_000:
-                    return price
+                    price_counts[price] += 1
             except ValueError:
                 continue
-    return None
+
+    if not price_counts:
+        return None
+
+    max_freq = max(price_counts.values())
+    candidates = [p for p, c in price_counts.items() if c == max_freq]
+    return max(candidates)
 
 
 def _extract_title_from_markdown(markdown: str) -> str:
