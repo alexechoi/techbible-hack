@@ -1,65 +1,258 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+import Header from "./components/Header";
+import UrlInput from "./components/UrlInput";
+import AgentLog, { type LogEntry } from "./components/AgentLog";
+import CountryCard from "./components/CountryCard";
+import DecisionCard from "./components/DecisionCard";
+import BuyAlert from "./components/BuyAlert";
+import WatchToggle from "./components/WatchToggle";
+import { CardSkeleton } from "./components/Skeleton";
+
+interface PriceData {
+  country: string;
+  country_code: string;
+  currency: string;
+  original_price: number | null;
+  price_gbp: number | null;
+  vat_rate: number;
+  ex_vat_gbp: number | null;
+  with_uk_vat_gbp: number | null;
+  shipping_gbp: number;
+  landed_cost_gbp: number | null;
+  savings_vs_uk_pct: number | null;
+  error: string | null;
+}
+
+interface Decision {
+  verdict: "BUY" | "PASS";
+  best_country: string | null;
+  best_country_code: string | null;
+  best_landed_cost: number | null;
+  uk_price: number | null;
+  savings_pct: number | null;
+  savings_gbp: number | null;
+  confidence: number;
+  reasoning: string;
+}
+
+interface ArbitrageResult {
+  asin: string;
+  product_title: string;
+  uk_price: number | null;
+  prices: PriceData[];
+  decision: Decision | null;
+}
 
 export default function Home() {
+  const [isRunning, setIsRunning] = useState(false);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [result, setResult] = useState<ArbitrageResult | null>(null);
+  const [alert, setAlert] = useState<{
+    savingsGbp: number;
+    savingsPct: number;
+    country: string;
+  } | null>(null);
+  const [watchActive, setWatchActive] = useState(false);
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [currentUrl, setCurrentUrl] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const runArbitrage = useCallback(async (url: string) => {
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setIsRunning(true);
+    setLogEntries([]);
+    setResult(null);
+    setAlert(null);
+    setCurrentUrl(url);
+
+    try {
+      const response = await fetch("/api/arbitrage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        setLogEntries((prev) => [
+          ...prev,
+          {
+            type: "error",
+            message: `Request failed: ${response.status} ${response.statusText}`,
+            timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+          },
+        ]);
+        setIsRunning(false);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            try {
+              const parsed = JSON.parse(dataStr);
+              const entry: LogEntry = {
+                type: parsed.type || currentEvent,
+                message: parsed.message || "",
+                timestamp: parsed.timestamp || new Date().toLocaleTimeString("en-GB", { hour12: false }),
+              };
+              setLogEntries((prev) => [...prev, entry]);
+
+              if (parsed.type === "complete" && parsed.data) {
+                setResult(parsed.data as ArbitrageResult);
+              }
+
+              if (parsed.type === "alert" && parsed.data) {
+                setAlert({
+                  savingsGbp: parsed.data.savings_gbp,
+                  savingsPct: parsed.data.savings_pct,
+                  country: parsed.data.country,
+                });
+              }
+            } catch {
+              // non-JSON SSE data, ignore
+            }
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setLogEntries((prev) => [
+        ...prev,
+        {
+          type: "error",
+          message: `Connection error: ${err instanceof Error ? err.message : String(err)}`,
+          timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+        },
+      ]);
+    } finally {
+      setIsRunning(false);
+      setLastChecked(
+        new Date().toLocaleTimeString("en-GB", { hour12: false }),
+      );
+    }
+  }, []);
+
+  const toggleWatch = useCallback(async () => {
+    if (watchActive) {
+      await fetch("/api/watch/stop", { method: "POST" });
+      setWatchActive(false);
+    } else if (currentUrl) {
+      await fetch("/api/watch/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: currentUrl }),
+      });
+      setWatchActive(true);
+    }
+  }, [watchActive, currentUrl]);
+
+  const bestCountry = result?.decision?.best_country;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="flex flex-col h-screen">
+      <Header isActive={isRunning} />
+
+      {alert && (
+        <BuyAlert
+          savingsGbp={alert.savingsGbp}
+          savingsPct={alert.savingsPct}
+          country={alert.country}
+          onDismiss={() => setAlert(null)}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+      )}
+
+      <UrlInput onSubmit={runArbitrage} disabled={isRunning} />
+
+      <div className="flex flex-1 min-h-0">
+        {/* Left panel: Agent Log */}
+        <div className="w-[40%] border-r border-border flex flex-col">
+          <AgentLog entries={logEntries} />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        {/* Right panel: Results */}
+        <div className="w-[60%] overflow-y-auto p-6 space-y-6">
+          {!result && !isRunning && (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center space-y-2">
+                <p className="text-muted text-sm">
+                  No analysis yet. Paste an Amazon UK URL to get started.
+                </p>
+                <p className="text-muted/50 text-xs font-mono">
+                  The agent will scan UK, DE, FR, ES, and IT
+                </p>
+              </div>
+            </div>
+          )}
+
+          {isRunning && !result && (
+            <div className="space-y-4">
+              <div className="rounded-xl border-2 border-border bg-surface p-5 space-y-3">
+                <div className="h-6 w-32 animate-pulse rounded bg-zinc-800/60" />
+                <div className="h-4 w-full animate-pulse rounded bg-zinc-800/60" />
+                <div className="h-1.5 w-full animate-pulse rounded bg-zinc-800/60" />
+              </div>
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <CardSkeleton key={i} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {result && (
+            <>
+              {result.decision && (
+                <DecisionCard decision={result.decision} />
+              )}
+
+              {result.product_title && (
+                <p className="text-sm text-muted truncate" title={result.product_title}>
+                  {result.product_title}
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
+                {result.prices.map((p) => (
+                  <CountryCard
+                    key={p.country_code}
+                    data={p}
+                    isBest={p.country === bestCountry}
+                    isUk={p.country === "UK"}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </div>
-      </main>
+      </div>
+
+      <WatchToggle
+        active={watchActive}
+        lastChecked={lastChecked}
+        onToggle={toggleWatch}
+        disabled={!currentUrl}
+      />
     </div>
   );
 }
