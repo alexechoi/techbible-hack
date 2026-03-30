@@ -447,7 +447,7 @@ export default function Home() {
                   <div key={p.country_code} className="animate-fade-in">
                     <CountryCard
                       data={p}
-                      isBest={p.country === decision?.best_country}
+                      isBest={decision?.verdict === "BUY" && p.country === decision?.best_country}
                       isUk={p.country === "UK"}
                     />
                   </div>

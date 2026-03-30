@@ -119,19 +119,25 @@ def make_decision(
         if savings_pct > 0:
             reasoning = (
                 f"Best EU option is Amazon {best.country} at £{best.landed_cost_gbp:.2f} landed, "
-                f"saving {savings_pct}%. Below the {BUY_THRESHOLD_PCT}% threshold to recommend buying."
+                f"saving only {savings_pct}%. Below the {BUY_THRESHOLD_PCT}% threshold — "
+                f"stick with Amazon UK at £{uk_price:.2f}."
             )
         else:
             reasoning = (
-                f"No EU store is cheaper than the UK price of £{uk_price:.2f} after "
-                f"accounting for VAT adjustment and shipping."
+                f"Amazon UK at £{uk_price:.2f} is the best price. "
+                f"No EU store beats it after VAT adjustment and shipping "
+                f"(cheapest EU landed cost: £{best.landed_cost_gbp:.2f} from {best.country})."
             )
+
+    best_c = best.country if verdict == Verdict.BUY else "UK"
+    best_cc = best.country_code if verdict == Verdict.BUY else "GB"
+    best_lc = best.landed_cost_gbp if verdict == Verdict.BUY else uk_price
 
     decision = Decision(
         verdict=verdict,
-        best_country=best.country,
-        best_country_code=best.country_code,
-        best_landed_cost=best.landed_cost_gbp,
+        best_country=best_c,
+        best_country_code=best_cc,
+        best_landed_cost=best_lc,
         uk_price=uk_price,
         savings_pct=savings_pct,
         savings_gbp=savings_gbp,

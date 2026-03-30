@@ -37,23 +37,31 @@ export default function DecisionCard({ decision }: DecisionCardProps) {
           )}
           <span
             className={`text-2xl font-bold tracking-tight ${
-              isBuy ? "text-accent" : "text-muted"
+              isBuy ? "text-accent" : "text-foreground"
             }`}
           >
-            {decision.verdict}
+            {isBuy ? "BUY" : "UK IS BEST"}
           </span>
         </div>
 
-        {isBuy && decision.savings_gbp !== null && (
-          <div className="text-right">
-            <div className="text-3xl font-bold text-accent">
-              Save £{decision.savings_gbp.toFixed(2)}
-            </div>
-            <div className="text-sm text-accent/70 font-mono">
-              {decision.savings_pct?.toFixed(1)}% cheaper
-            </div>
-          </div>
-        )}
+        <div className="text-right">
+          {isBuy && decision.savings_gbp !== null ? (
+            <>
+              <div className="text-3xl font-bold text-accent">
+                Save £{decision.savings_gbp.toFixed(2)}
+              </div>
+              <div className="text-sm text-accent/70 font-mono">
+                {decision.savings_pct?.toFixed(1)}% cheaper
+              </div>
+            </>
+          ) : (
+            decision.uk_price !== null && (
+              <div className="text-2xl font-bold text-foreground">
+                £{decision.uk_price.toFixed(2)}
+              </div>
+            )
+          )}
+        </div>
       </div>
 
       {/* Confidence bar */}
