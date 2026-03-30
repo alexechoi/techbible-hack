@@ -6,7 +6,6 @@ import {
   Globe,
   PoundSterling,
   Calculator,
-  AlertTriangle,
   CheckCircle2,
   XCircle,
   Bell,
