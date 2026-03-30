@@ -25,8 +25,8 @@ from models import (
 )
 from scraper import (
     AMAZON_DOMAINS,
+    _collect_price_candidates,
     _extract_title_from_markdown,
-    _parse_price_from_markdown,
     build_product_url,
     extract_asin,
 )
@@ -44,6 +44,16 @@ to buy from an EU Amazon store after accounting for currency conversion, VAT adj
   Make 5 parallel scrape_amazon_product tool calls immediately.
 - After getting results, give a brief analysis. Landed cost calculations are done automatically — \
   just focus on your recommendation.
+
+## Choosing the correct price
+Each scrape returns candidate prices with occurrence counts. Amazon pages contain many prices \
+(finance installments, accessories, related products). YOU must pick the real headline product \
+price for each store. Use your knowledge of the product to choose correctly:
+- The headline price is usually the MOST FREQUENT and appears near the TOP of the page.
+- Finance/installment prices (e.g. "£33.99/mo") are much lower than the real price.
+- Related product prices appear lower on the page.
+- If a candidate seems implausibly low for the product type, it is NOT the headline price.
+Return the chosen price for each store in your response.
 
 ## After getting prices
 Provide a SHORT analysis (3-4 sentences max). State: BUY (which store, why) or PASS (why).
@@ -73,7 +83,7 @@ async def scrape_amazon_product(url: str) -> str:
 
     try:
         markdown = await scrape_url(url)
-        price = _parse_price_from_markdown(markdown, info["currency_symbol"])
+        candidates = _collect_price_candidates(markdown, info["currency_symbol"])
         title = _extract_title_from_markdown(markdown)
 
         result = {
@@ -81,12 +91,12 @@ async def scrape_amazon_product(url: str) -> str:
             "country_code": info["code"],
             "domain": info["domain"],
             "currency": info["currency"],
-            "price": price,
             "title": title,
             "url": url,
+            "price_candidates": candidates,
         }
-        if price is None:
-            result["error"] = "Price not found — product may not be available."
+        if not candidates:
+            result["error"] = "No prices found — product may not be available."
         return json.dumps(result)
     except Exception as exc:
         logger.exception("scrape_amazon_product failed for %s", url)
@@ -112,6 +122,7 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
     agent = _build_agent()
 
     collected_prices: dict[str, dict] = {}
+    _all_thinking_events: list[AgentEvent] = []
     asin = extract_asin(url)
 
     yield _sse(AgentEvent(
@@ -140,10 +151,9 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
                         if isinstance(msg, AIMessage):
                             if msg.content:
                                 for sentence in _split_into_thoughts(msg.content):
-                                    yield _sse(AgentEvent(
-                                        type=EventType.THINKING,
-                                        message=sentence,
-                                    ))
+                                    evt = AgentEvent(type=EventType.THINKING, message=sentence)
+                                    _all_thinking_events.append(evt)
+                                    yield _sse(evt)
 
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
@@ -161,15 +171,22 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
                             except (json.JSONDecodeError, TypeError):
                                 continue
 
-                            if "price" in data and data.get("price") is not None:
-                                cc = data.get("country_code", "")
-                                price = data["price"]
+                            cc = data.get("country_code", "")
+                            candidates = data.get("price_candidates", [])
+
+                            if candidates:
+                                top = candidates[0]
                                 currency = data.get("currency", "")
                                 sym = "£" if currency == "GBP" else "€"
+                                # Store tool metadata; LLM will pick the real price
                                 collected_prices[cc] = data
+                                summary = ", ".join(
+                                    f"{c['display']} (x{c['occurrences']}, {c['first_appears']})"
+                                    for c in candidates[:3]
+                                )
                                 yield _sse(AgentEvent(
                                     type=EventType.PRICE_FOUND,
-                                    message=f"Found price on {data.get('domain', '?')}: {sym}{price:.2f}",
+                                    message=f"Scraped {data.get('domain', '?')}: candidates {summary}",
                                     data=data,
                                 ))
                             elif "error" in data:
@@ -181,19 +198,44 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
         logger.exception("Agent execution error")
         yield _sse(AgentEvent(type=EventType.ERROR, message=f"Agent error: {exc}"))
 
-    # Auto-calculate landed costs (no LLM round-trip needed)
+    # Parse the LLM's chosen prices from its thinking output
+    llm_chosen: dict[str, float] = {}
+    all_thoughts = " ".join(e.message for e in _all_thinking_events)
+    for cc_name, info in AMAZON_DOMAINS.items():
+        cc = info["code"]
+        sym = info["currency_symbol"]
+        escaped_sym = re.escape(sym)
+        # Look for patterns like "UK: £469.00" or "DE: €413.81" in LLM output
+        for pat in [
+            rf"(?:{cc_name}|{cc})[:\s]+{escaped_sym}\s*([\d,]+\.?\d*)",
+            rf"(?:{cc_name}|{cc}).*?{escaped_sym}\s*([\d,]+\.?\d*)",
+        ]:
+            m = re.search(pat, all_thoughts, re.IGNORECASE)
+            if m:
+                try:
+                    llm_chosen[cc] = float(m.group(1).replace(",", ""))
+                    break
+                except ValueError:
+                    continue
+
     all_prices: list[PriceData] = []
     uk_price: float | None = None
     product_title = ""
 
     for cc, data in collected_prices.items():
         country = data.get("country", "")
+        candidates = data.get("price_candidates", [])
+        # Use LLM's choice if available, else fall back to top candidate
+        price = llm_chosen.get(cc)
+        if price is None and candidates:
+            price = candidates[0]["price"]
+
         pd = PriceData(
             country=country,
             country_code=cc,
             domain=data.get("domain", ""),
             currency=data.get("currency", ""),
-            original_price=data.get("price"),
+            original_price=price,
             product_title=data.get("title", ""),
             error=data.get("error"),
         )

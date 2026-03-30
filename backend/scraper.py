@@ -58,14 +58,12 @@ def extract_asin(url: str) -> str | None:
     return None
 
 
-def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | None:
-    """Extract the headline product price from scraped markdown.
+def _collect_price_candidates(
+    markdown: str, currency_symbol: str
+) -> list[dict]:
+    """Return candidate prices with frequency and position data for LLM selection."""
+    from collections import Counter
 
-    Strategy: the real product price appears in the top portion of the page
-    (price block, buy box) while "related product" prices appear lower down.
-    We score prices found in the top 20% of the page 3x higher, then pick
-    the highest-scoring price, breaking ties by value (headline > accessory).
-    """
     escaped = re.escape(currency_symbol)
     text = markdown.replace("\xa0", " ")
 
@@ -76,10 +74,8 @@ def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | N
         rf"(\d{{1,5}})\s*{escaped}",
     ]
 
-    from collections import Counter
-    top_cutoff = len(text) // 5
-    top_prices: Counter[float] = Counter()
     all_prices: Counter[float] = Counter()
+    first_pos: dict[float, int] = {}
 
     for pat in patterns:
         for m in re.finditer(pat, text):
@@ -89,21 +85,36 @@ def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | N
                 price = float(cleaned)
                 if 1.0 < price < 10_000:
                     all_prices[price] += 1
-                    if m.start() < top_cutoff:
-                        top_prices[price] += 1
+                    if price not in first_pos:
+                        first_pos[price] = m.start()
             except ValueError:
                 continue
 
     if not all_prices:
+        return []
+
+    sym = currency_symbol
+    candidates = []
+    for price, count in all_prices.most_common(5):
+        pct_pos = round(first_pos[price] / max(len(text), 1) * 100)
+        candidates.append({
+            "price": price,
+            "display": f"{sym}{price:,.2f}",
+            "occurrences": count,
+            "first_appears": f"top {pct_pos}% of page",
+        })
+    return candidates
+
+
+def _parse_price_from_markdown(markdown: str, currency_symbol: str) -> float | None:
+    """Fallback: pick best-guess headline price from candidates."""
+    candidates = _collect_price_candidates(markdown, currency_symbol)
+    if not candidates:
         return None
-
-    scores: Counter[float] = Counter()
-    for price, count in all_prices.items():
-        scores[price] = count + top_prices.get(price, 0) * 3
-
-    max_score = max(scores.values())
-    candidates = [p for p, s in scores.items() if s == max_score]
-    return max(candidates)
+    # Simple heuristic: most frequent, then highest
+    top_count = candidates[0]["occurrences"]
+    best = [c for c in candidates if c["occurrences"] == top_count]
+    return max(c["price"] for c in best)
 
 
 def _extract_title_from_markdown(markdown: str) -> str:
