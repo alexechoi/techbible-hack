@@ -13,12 +13,8 @@ from langgraph.prebuilt import create_react_agent
 from sse_starlette.sse import ServerSentEvent
 
 from backend.arbitrage import (
-    DEFAULT_SHIPPING_GBP,
-    FX_RATES,
-    VAT_RATES,
     calculate_landed_cost,
     make_decision,
-    to_gbp,
 )
 from backend.mcp_client import scrape_url
 from backend.models import (
@@ -41,24 +37,17 @@ SYSTEM_PROMPT = """\
 You are ArbitrageAgent, an autonomous cross-border Amazon price intelligence agent.
 
 Your mission: Given an Amazon UK product URL, determine whether the same product is cheaper \
-to buy from an EU Amazon store (Germany, France, Spain, Italy) after accounting for \
-currency conversion, VAT adjustment, and shipping.
+to buy from an EU Amazon store after accounting for currency conversion, VAT adjustment, and shipping.
 
-## How to work
+## CRITICAL: Be fast
+- Scrape ALL 5 stores (UK + 4 EU) simultaneously in your FIRST response. \
+  Make 5 parallel scrape_amazon_product tool calls immediately.
+- After getting results, give a brief analysis. Landed cost calculations are done automatically — \
+  just focus on your recommendation.
 
-1. Extract the ASIN (the 10-character product ID from the /dp/ segment of the URL).
-2. Scrape the UK store first to establish the baseline GBP price.
-3. Scrape the EU stores (amazon.de, amazon.fr, amazon.es, amazon.it) for the same ASIN. \
-   You SHOULD call scrape_amazon_product for all EU stores simultaneously in a single response \
-   to save time.
-4. For each EU price found, call calculate_eu_landed_cost to get the true cost of importing to the UK.
-5. Compare all landed costs against the UK price and give your final recommendation.
-
-## Important notes
-- If a store doesn't carry the product, note it and move on.
-- Always explain your reasoning at each step — the user can see your thoughts in real-time.
-- Be concise but thorough. Think like a trading analyst.
-- After all analysis, state clearly: BUY (with which store) or PASS, and why.
+## After getting prices
+Provide a SHORT analysis (3-4 sentences max). State: BUY (which store, why) or PASS (why).
+If a store didn't have the product, just skip it.
 """
 
 
@@ -72,9 +61,6 @@ def _detect_country_from_url(url: str) -> tuple[str, dict] | None:
 @tool
 async def scrape_amazon_product(url: str) -> str:
     """Scrape an Amazon product page using Bright Data MCP and extract the price.
-
-    Use this tool to get the current price of a product on any Amazon store.
-    Build the URL as: https://www.{domain}/dp/{ASIN}
 
     Args:
         url: Full Amazon product URL, e.g. https://www.amazon.de/dp/B0CHWZ9TZS
@@ -100,52 +86,11 @@ async def scrape_amazon_product(url: str) -> str:
             "url": url,
         }
         if price is None:
-            result["error"] = "Price not found on this page — product may not be available in this store."
+            result["error"] = "Price not found — product may not be available."
         return json.dumps(result)
     except Exception as exc:
         logger.exception("scrape_amazon_product failed for %s", url)
         return json.dumps({"country": country, "country_code": info["code"], "error": str(exc)})
-
-
-@tool
-def calculate_eu_landed_cost(
-    original_price: float,
-    currency: str,
-    country_code: str,
-) -> str:
-    """Calculate the true landed cost of importing a product from an EU Amazon store to the UK.
-
-    This accounts for: currency conversion to GBP, removal of local VAT, addition of UK VAT (20%), and shipping.
-
-    Args:
-        original_price: The product price in its original currency (e.g. 162.34)
-        currency: The currency code (EUR or GBP)
-        country_code: Two-letter country code (DE, FR, ES, IT)
-    """
-    price_gbp = to_gbp(original_price, currency)
-    local_vat = VAT_RATES.get(country_code, 0.20)
-    ex_vat = round(price_gbp / (1 + local_vat), 2)
-    with_uk_vat = round(ex_vat * 1.20, 2)
-    shipping = DEFAULT_SHIPPING_GBP
-    landed = round(with_uk_vat + shipping, 2)
-
-    return json.dumps({
-        "country_code": country_code,
-        "original_price": original_price,
-        "currency": currency,
-        "price_gbp": price_gbp,
-        "local_vat_rate": local_vat,
-        "ex_vat_gbp": ex_vat,
-        "with_uk_vat_gbp": with_uk_vat,
-        "shipping_gbp": shipping,
-        "landed_cost_gbp": landed,
-        "breakdown": (
-            f"{currency} {original_price:.2f} → £{price_gbp:.2f} | "
-            f"-{local_vat:.0%} local VAT → £{ex_vat:.2f} | "
-            f"+20% UK VAT → £{with_uk_vat:.2f} | "
-            f"+£{shipping:.2f} shipping = £{landed:.2f} landed"
-        ),
-    })
 
 
 def _build_agent():
@@ -153,7 +98,7 @@ def _build_agent():
     llm = ChatGoogleGenerativeAI(model=model_name, temperature=0)
     return create_react_agent(
         model=llm,
-        tools=[scrape_amazon_product, calculate_eu_landed_cost],
+        tools=[scrape_amazon_product],
         prompt=SYSTEM_PROMPT,
     )
 
@@ -163,7 +108,7 @@ def _sse(evt: AgentEvent) -> ServerSentEvent:
 
 
 async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]:
-    """Run the LangGraph arbitrage agent and yield SSE events as it thinks and acts."""
+    """Run the LangGraph arbitrage agent and yield SSE events."""
     agent = _build_agent()
 
     collected_prices: dict[str, dict] = {}
@@ -175,15 +120,12 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
         data={"asin": asin, "url": url},
     ))
 
+    urls = {c: build_product_url(asin, info["domain"]) for c, info in AMAZON_DOMAINS.items()}
+    url_list = "\n".join(f"- {c}: {u}" for c, u in urls.items())
+
     user_message = (
-        f"Analyse this Amazon UK product for cross-border arbitrage opportunities:\n"
-        f"{url}\n\n"
-        f"The ASIN is {asin}. The Amazon stores to check are:\n"
-        f"- UK: https://www.amazon.co.uk/dp/{asin}\n"
-        f"- DE: https://www.amazon.de/dp/{asin}\n"
-        f"- FR: https://www.amazon.fr/dp/{asin}\n"
-        f"- ES: https://www.amazon.es/dp/{asin}\n"
-        f"- IT: https://www.amazon.it/dp/{asin}\n"
+        f"Analyse ASIN {asin} for cross-border arbitrage. "
+        f"Scrape ALL 5 stores NOW in parallel:\n{url_list}"
     )
 
     input_state = {"messages": [HumanMessage(content=user_message)]}
@@ -205,19 +147,10 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
 
                             if msg.tool_calls:
                                 for tc in msg.tool_calls:
-                                    name = tc["name"]
-                                    args = tc["args"]
-                                    if name == "scrape_amazon_product":
-                                        domain = args.get("url", "")
+                                    if tc["name"] == "scrape_amazon_product":
                                         yield _sse(AgentEvent(
                                             type=EventType.SCRAPING,
-                                            message=f"Deploying Bright Data MCP scraper → {domain}",
-                                        ))
-                                    elif name == "calculate_eu_landed_cost":
-                                        cc = args.get("country_code", "?")
-                                        yield _sse(AgentEvent(
-                                            type=EventType.CALCULATING,
-                                            message=f"Calculating landed cost for {cc}...",
+                                            message=f"Deploying Bright Data MCP scraper → {tc['args'].get('url', '')}",
                                         ))
 
                 elif node_name == "tools":
@@ -229,7 +162,6 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
                                 continue
 
                             if "price" in data and data.get("price") is not None:
-                                country = data.get("country", "?")
                                 cc = data.get("country_code", "")
                                 price = data["price"]
                                 currency = data.get("currency", "")
@@ -237,17 +169,8 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
                                 collected_prices[cc] = data
                                 yield _sse(AgentEvent(
                                     type=EventType.PRICE_FOUND,
-                                    message=f"Found price on {data.get('domain', country)}: {sym}{price:.2f}",
+                                    message=f"Found price on {data.get('domain', '?')}: {sym}{price:.2f}",
                                     data=data,
-                                ))
-                            elif "landed_cost_gbp" in data:
-                                cc = data.get("country_code", "?")
-                                breakdown = data.get("breakdown", "")
-                                if cc in collected_prices:
-                                    collected_prices[cc].update(data)
-                                yield _sse(AgentEvent(
-                                    type=EventType.CALCULATING,
-                                    message=f"{cc}: {breakdown}",
                                 ))
                             elif "error" in data:
                                 yield _sse(AgentEvent(
@@ -258,12 +181,7 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
         logger.exception("Agent execution error")
         yield _sse(AgentEvent(type=EventType.ERROR, message=f"Agent error: {exc}"))
 
-    # Build the final ArbitrageResult from collected data
-    yield _sse(AgentEvent(
-        type=EventType.THINKING,
-        message="Compiling final analysis...",
-    ))
-
+    # Auto-calculate landed costs (no LLM round-trip needed)
     all_prices: list[PriceData] = []
     uk_price: float | None = None
     product_title = ""
@@ -280,26 +198,17 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
             error=data.get("error"),
         )
 
-        if data.get("landed_cost_gbp"):
-            pd.price_gbp = data.get("price_gbp")
-            pd.vat_rate = data.get("local_vat_rate", 0.0)
-            pd.ex_vat_gbp = data.get("ex_vat_gbp")
-            pd.with_uk_vat_gbp = data.get("with_uk_vat_gbp")
-            pd.shipping_gbp = data.get("shipping_gbp", 10.0)
-            pd.landed_cost_gbp = data.get("landed_cost_gbp")
-        elif cc == "GB" and pd.original_price is not None:
-            pd.price_gbp = pd.original_price
-            pd.ex_vat_gbp = pd.original_price
-            pd.with_uk_vat_gbp = pd.original_price
-            pd.shipping_gbp = 0.0
-            pd.landed_cost_gbp = pd.original_price
-            pd.vat_rate = 0.20
+        if cc == "GB":
+            pd, _ = calculate_landed_cost(pd, shipping_gbp=0.0)
+            if pd.original_price is not None:
+                uk_price = pd.original_price
+        else:
+            pd, calc_events = calculate_landed_cost(pd)
+            for evt in calc_events:
+                yield _sse(evt)
 
-        if cc == "GB" and pd.original_price is not None:
-            uk_price = pd.original_price
         if pd.product_title and not product_title:
             product_title = pd.product_title
-
         all_prices.append(pd)
 
     decision, decision_events = make_decision(uk_price, all_prices)
@@ -322,7 +231,6 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
 
 
 def _normalize_content(content) -> str:
-    """Gemini may return content as a list of blocks; normalise to str."""
     if isinstance(content, list):
         return " ".join(
             c if isinstance(c, str) else c.get("text", str(c))
@@ -332,7 +240,6 @@ def _normalize_content(content) -> str:
 
 
 def _split_into_thoughts(text) -> list[str]:
-    """Split LLM output into individual thought lines for the agent log."""
     text = _normalize_content(text)
     if not text:
         return []
