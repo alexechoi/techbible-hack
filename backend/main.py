@@ -9,9 +9,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-_root = Path(__file__).resolve().parent.parent
-load_dotenv(_root / ".env")
-load_dotenv()  # also pick up backend/.env if present
+_backend_dir = Path(__file__).resolve().parent
+load_dotenv(_backend_dir / ".env")
+load_dotenv()  # also pick up cwd .env if present
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

@@ -149,7 +149,7 @@ def calculate_eu_landed_cost(
 
 
 def _build_agent():
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     llm = ChatGoogleGenerativeAI(model=model_name, temperature=0)
     return create_react_agent(
         model=llm,
@@ -321,8 +321,21 @@ async def run_arbitrage_agent(url: str) -> AsyncGenerator[ServerSentEvent, None]
     ))
 
 
-def _split_into_thoughts(text: str) -> list[str]:
+def _normalize_content(content) -> str:
+    """Gemini may return content as a list of blocks; normalise to str."""
+    if isinstance(content, list):
+        return " ".join(
+            c if isinstance(c, str) else c.get("text", str(c))
+            for c in content
+        )
+    return str(content) if content else ""
+
+
+def _split_into_thoughts(text) -> list[str]:
     """Split LLM output into individual thought lines for the agent log."""
+    text = _normalize_content(text)
+    if not text:
+        return []
     lines = []
     for line in text.strip().split("\n"):
         line = line.strip()
