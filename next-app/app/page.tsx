@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Header from "./components/Header";
 import UrlInput from "./components/UrlInput";
 import AgentLog, { type LogEntry } from "./components/AgentLog";
@@ -8,6 +8,7 @@ import CountryCard from "./components/CountryCard";
 import DecisionCard from "./components/DecisionCard";
 import BuyAlert from "./components/BuyAlert";
 import WatchToggle from "./components/WatchToggle";
+import WishlistPanel from "./components/WishlistPanel";
 
 interface PriceData {
   country: string;
@@ -38,9 +39,23 @@ interface Decision {
   reasoning: string;
 }
 
+interface WishlistItem {
+  asin: string;
+  url: string;
+  title: string;
+  status: string;
+  verdict: string | null;
+  savings_pct: number | null;
+  savings_gbp: number | null;
+  best_country: string | null;
+  uk_price: number | null;
+  best_landed_cost: number | null;
+}
+
 const COUNTRY_ORDER = ["GB", "DE", "FR", "ES", "IT"];
 
 export default function Home() {
+  const [mode, setMode] = useState<"analyse" | "wishlist">("analyse");
   const [isRunning, setIsRunning] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [liveCountries, setLiveCountries] = useState<Record<string, PriceData>>({});
@@ -56,40 +71,26 @@ export default function Home() {
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const runArbitrage = useCallback(async (url: string) => {
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  // Wishlist state
+  const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
+  const [isWishlistScanning, setIsWishlistScanning] = useState(false);
 
-    setIsRunning(true);
-    setLogEntries([]);
-    setLiveCountries({});
-    setDecision(null);
-    setAlert(null);
-    setScrapingSet(new Set());
-    setCurrentUrl(url);
-
+  const fetchWishlist = useCallback(async () => {
     try {
-      const response = await fetch("/api/arbitrage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-        signal: controller.signal,
-      });
+      const res = await fetch("/api/wishlist");
+      if (res.ok) setWishlist(await res.json());
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
-      if (!response.ok || !response.body) {
-        setLogEntries((prev) => [
-          ...prev,
-          {
-            type: "error",
-            message: `Request failed: ${response.status} ${response.statusText}`,
-            timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-          },
-        ]);
-        setIsRunning(false);
-        return;
-      }
+  useEffect(() => {
+    fetchWishlist();
+  }, [fetchWishlist]);
 
+  const handleSSEStream = useCallback(
+    async (response: Response) => {
+      if (!response.body) return;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -161,6 +162,8 @@ export default function Home() {
                 if (result.decision) {
                   setDecision(result.decision);
                 }
+                // Refresh wishlist to pick up updated statuses
+                fetchWishlist();
               }
 
               if (parsed.type === "decision" && parsed.data) {
@@ -175,28 +178,125 @@ export default function Home() {
                 });
               }
             } catch {
-              // non-JSON SSE data
+              /* non-JSON SSE data */
             }
           }
         }
       }
+    },
+    [fetchWishlist],
+  );
+
+  const runArbitrage = useCallback(
+    async (url: string) => {
+      if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setIsRunning(true);
+      setLogEntries([]);
+      setLiveCountries({});
+      setDecision(null);
+      setAlert(null);
+      setScrapingSet(new Set());
+      setCurrentUrl(url);
+
+      try {
+        const response = await fetch("/api/arbitrage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok || !response.body) {
+          setLogEntries((prev) => [
+            ...prev,
+            {
+              type: "error",
+              message: `Request failed: ${response.status} ${response.statusText}`,
+              timestamp: new Date().toLocaleTimeString("en-GB", {
+                hour12: false,
+              }),
+            },
+          ]);
+          setIsRunning(false);
+          return;
+        }
+
+        await handleSSEStream(response);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setLogEntries((prev) => [
+          ...prev,
+          {
+            type: "error",
+            message: `Connection error: ${err instanceof Error ? err.message : String(err)}`,
+            timestamp: new Date().toLocaleTimeString("en-GB", {
+              hour12: false,
+            }),
+          },
+        ]);
+      } finally {
+        setIsRunning(false);
+        setLastChecked(
+          new Date().toLocaleTimeString("en-GB", { hour12: false }),
+        );
+      }
+    },
+    [handleSSEStream],
+  );
+
+  // Wishlist handlers
+  const addToWishlist = useCallback(
+    async (url: string) => {
+      await fetch("/api/wishlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      await fetchWishlist();
+    },
+    [fetchWishlist],
+  );
+
+  const removeFromWishlist = useCallback(
+    async (asin: string) => {
+      await fetch(`/api/wishlist/${asin}`, { method: "DELETE" });
+      await fetchWishlist();
+    },
+    [fetchWishlist],
+  );
+
+  const scanAllWishlist = useCallback(async () => {
+    setIsWishlistScanning(true);
+    setLogEntries([]);
+    setLiveCountries({});
+    setDecision(null);
+    setAlert(null);
+    setScrapingSet(new Set());
+
+    try {
+      const response = await fetch("/api/wishlist/scan-all", {
+        method: "POST",
+      });
+      if (response.ok && response.body) {
+        await handleSSEStream(response);
+      }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") return;
       setLogEntries((prev) => [
         ...prev,
         {
           type: "error",
-          message: `Connection error: ${err instanceof Error ? err.message : String(err)}`,
+          message: `Scan error: ${err instanceof Error ? err.message : String(err)}`,
           timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
         },
       ]);
     } finally {
-      setIsRunning(false);
-      setLastChecked(
-        new Date().toLocaleTimeString("en-GB", { hour12: false }),
-      );
+      setIsWishlistScanning(false);
+      await fetchWishlist();
     }
-  }, []);
+  }, [handleSSEStream, fetchWishlist]);
 
   const toggleWatch = useCallback(async () => {
     if (watchActive) {
@@ -212,16 +312,18 @@ export default function Home() {
     }
   }, [watchActive, currentUrl]);
 
-  const sortedPrices = COUNTRY_ORDER
-    .filter((cc) => liveCountries[cc])
-    .map((cc) => liveCountries[cc]);
+  const sortedPrices = COUNTRY_ORDER.filter((cc) => liveCountries[cc]).map(
+    (cc) => liveCountries[cc],
+  );
 
   const hasAnyData =
     sortedPrices.length > 0 || decision !== null || scrapingSet.size > 0;
 
+  const anyRunning = isRunning || isWishlistScanning;
+
   return (
     <div className="flex flex-col h-screen">
-      <Header isActive={isRunning} />
+      <Header isActive={anyRunning} />
 
       {alert && (
         <BuyAlert
@@ -232,17 +334,72 @@ export default function Home() {
         />
       )}
 
-      <UrlInput onSubmit={runArbitrage} disabled={isRunning} />
+      {/* Mode tabs + URL input */}
+      <div className="border-b border-border bg-surface">
+        <div className="flex items-center gap-1 px-6 pt-2">
+          <button
+            onClick={() => setMode("analyse")}
+            className={`px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors ${
+              mode === "analyse"
+                ? "bg-surface-2 text-foreground border border-b-0 border-border"
+                : "text-muted hover:text-foreground"
+            }`}
+          >
+            Analyse
+          </button>
+          <button
+            onClick={() => setMode("wishlist")}
+            className={`px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors ${
+              mode === "wishlist"
+                ? "bg-surface-2 text-foreground border border-b-0 border-border"
+                : "text-muted hover:text-foreground"
+            }`}
+          >
+            Wishlist
+            {wishlist.length > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-accent/20 text-accent text-[10px] font-bold">
+                {wishlist.length}
+              </span>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {mode === "analyse" && (
+        <UrlInput onSubmit={runArbitrage} disabled={anyRunning} />
+      )}
 
       <div className="flex flex-1 min-h-0">
-        {/* Left panel: Agent Log */}
+        {/* Left panel */}
         <div className="w-[40%] border-r border-border flex flex-col">
-          <AgentLog entries={logEntries} />
+          {mode === "analyse" ? (
+            <AgentLog entries={logEntries} />
+          ) : (
+            <WishlistPanel
+              items={wishlist}
+              onAdd={addToWishlist}
+              onRemove={removeFromWishlist}
+              onScanAll={scanAllWishlist}
+              isScanning={isWishlistScanning}
+            />
+          )}
         </div>
 
-        {/* Right panel: Results (progressive) */}
+        {/* Right panel */}
         <div className="w-[60%] overflow-y-auto p-6 space-y-6">
-          {!hasAnyData && !isRunning && (
+          {mode === "wishlist" && !hasAnyData && !isWishlistScanning && (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center space-y-2">
+                <p className="text-muted text-sm">
+                  Add products to your wishlist and hit{" "}
+                  <span className="text-accent font-semibold">Scan All</span>{" "}
+                  to let the agent process them autonomously.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {mode === "analyse" && !hasAnyData && !isRunning && (
             <div className="flex items-center justify-center h-full">
               <div className="text-center space-y-2">
                 <p className="text-muted text-sm">
@@ -255,8 +412,7 @@ export default function Home() {
             </div>
           )}
 
-          {/* Scanning indicator before any prices arrive */}
-          {isRunning && sortedPrices.length === 0 && scrapingSet.size > 0 && (
+          {anyRunning && sortedPrices.length === 0 && scrapingSet.size > 0 && (
             <div className="rounded-lg border border-border bg-surface p-4 animate-fade-in">
               <p className="text-sm text-muted mb-3 font-mono">
                 Scanning {scrapingSet.size} Amazon stores...
@@ -302,12 +458,14 @@ export default function Home() {
         </div>
       </div>
 
-      <WatchToggle
-        active={watchActive}
-        lastChecked={lastChecked}
-        onToggle={toggleWatch}
-        disabled={!currentUrl}
-      />
+      {mode === "analyse" && (
+        <WatchToggle
+          active={watchActive}
+          lastChecked={lastChecked}
+          onToggle={toggleWatch}
+          disabled={!currentUrl}
+        />
+      )}
     </div>
   );
 }

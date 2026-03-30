@@ -13,20 +13,27 @@ from dotenv import load_dotenv
 _backend_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_backend_dir))
 load_dotenv(_backend_dir / ".env")
-load_dotenv()  # also pick up cwd .env if present
+load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from agent import run_arbitrage_agent
-from models import ArbitrageRequest, WatcherState
+from models import AgentEvent, ArbitrageRequest, EventType, WatcherState, WishlistItem
+from scraper import extract_asin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 watcher_state = WatcherState()
 _watcher_task: asyncio.Task | None = None
+_wishlist: dict[str, WishlistItem] = {}
+
+
+def _sse(evt: AgentEvent) -> ServerSentEvent:
+    return ServerSentEvent(data=evt.model_dump_json(), event=evt.type.value)
 
 
 @asynccontextmanager
@@ -49,6 +56,8 @@ app.add_middleware(
 )
 
 
+# --- Single product analysis ---
+
 @app.post("/api/arbitrage")
 async def arbitrage(request: ArbitrageRequest):
     async def event_generator():
@@ -57,6 +66,87 @@ async def arbitrage(request: ArbitrageRequest):
 
     return EventSourceResponse(event_generator())
 
+
+# --- Wishlist ---
+
+@app.get("/api/wishlist")
+async def wishlist_list():
+    return list(_wishlist.values())
+
+
+@app.post("/api/wishlist")
+async def wishlist_add(request: ArbitrageRequest):
+    asin = extract_asin(request.url)
+    if not asin:
+        return {"error": "Could not extract ASIN from URL"}
+    if asin in _wishlist:
+        return _wishlist[asin].model_dump()
+    item = WishlistItem(asin=asin, url=request.url)
+    _wishlist[asin] = item
+    return item.model_dump()
+
+
+@app.delete("/api/wishlist/{asin}")
+async def wishlist_remove(asin: str):
+    _wishlist.pop(asin.upper(), None)
+    return {"status": "removed"}
+
+
+@app.post("/api/wishlist/scan-all")
+async def wishlist_scan_all():
+    """Process every wishlist item sequentially, streaming events for each."""
+
+    async def event_generator():
+        items = list(_wishlist.values())
+        if not items:
+            yield _sse(AgentEvent(
+                type=EventType.ERROR,
+                message="Wishlist is empty — add some products first.",
+            ))
+            return
+
+        yield _sse(AgentEvent(
+            type=EventType.THINKING,
+            message=f"Starting autonomous scan of {len(items)} wishlist products...",
+        ))
+
+        for idx, item in enumerate(items, 1):
+            item.status = "scanning"
+            yield _sse(AgentEvent(
+                type=EventType.THINKING,
+                message=f"[{idx}/{len(items)}] Scanning {item.asin}...",
+                data={"asin": item.asin, "index": idx, "total": len(items)},
+            ))
+
+            async for sse_event in run_arbitrage_agent(item.url):
+                yield sse_event
+
+                if hasattr(sse_event, "data") and sse_event.data:
+                    try:
+                        parsed = __import__("json").loads(sse_event.data)
+                        if parsed.get("type") == "complete" and parsed.get("data"):
+                            result = parsed["data"]
+                            d = result.get("decision", {})
+                            item.status = "done"
+                            item.verdict = d.get("verdict")
+                            item.savings_pct = d.get("savings_pct")
+                            item.savings_gbp = d.get("savings_gbp")
+                            item.best_country = d.get("best_country")
+                            item.uk_price = d.get("uk_price")
+                            item.best_landed_cost = d.get("best_landed_cost")
+                            item.title = result.get("product_title", "")
+                    except Exception:
+                        pass
+
+        yield _sse(AgentEvent(
+            type=EventType.THINKING,
+            message=f"All {len(items)} products scanned. Wishlist updated.",
+        ))
+
+    return EventSourceResponse(event_generator())
+
+
+# --- Watcher ---
 
 @app.post("/api/watch/start")
 async def watch_start(request: ArbitrageRequest):

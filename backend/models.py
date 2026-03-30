@@ -81,3 +81,16 @@ class WatcherState(BaseModel):
     interval_seconds: int = 300
     last_checked: str | None = None
     last_result: ArbitrageResult | None = None
+
+
+class WishlistItem(BaseModel):
+    asin: str
+    url: str
+    title: str = ""
+    status: str = "pending"
+    verdict: str | None = None
+    savings_pct: float | None = None
+    savings_gbp: float | None = None
+    best_country: str | None = None
+    uk_price: float | None = None
+    best_landed_cost: float | None = None
